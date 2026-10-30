@@ -161,7 +161,7 @@ def analyze(items, cfg):
     """Analyse TOUS les articles : prix de revente estimé, bénéfice, classés du plus haut au plus bas."""
     groups = {}
     for it in items:
-        key = (it.get("brand_title", "").lower(), it.get("size_title", "").lower())
+        key = (it.get("_query", ""), it.get("size_title", "").lower())
         groups.setdefault(key, []).append((it.get("id"), price_of(it)))
 
     rows = []
@@ -172,11 +172,12 @@ def analyze(items, cfg):
         buy = price_of(it)
         if buy <= 0:
             continue
-        key = (it.get("brand_title", "").lower(), it.get("size_title", "").lower())
-        others = [p for i, p in groups.get(key, []) if i != it.get("id") and p > 0] if key[0] else []
+        key = (it.get("_query", ""), it.get("size_title", "").lower())
+        others = [p for i, p in groups.get(key, []) if i != it.get("id") and p > 0]
         row = {
             "Article": it.get("title", ""), "Marque": it.get("brand_title", ""),
             "Taille": it.get("size_title", ""), "État": it.get("status", ""),
+            "Produit": it.get("_query", ""),
             "Prix achat": round(buy, 2), "Revente estimée": None, "Bénéfice": None,
             "Marge %": None, "Favoris": it.get("favourite_count", 0),
             "Confiance": f"insuffisante ({len(others)})",
@@ -198,39 +199,74 @@ def analyze(items, cfg):
     return rows
 
 
+import time
+
 import pandas as pd
 import streamlit as st
 
+POPULAIRES = [
+    "nike air force 1", "nike tech fleece", "adidas samba", "adidas gazelle",
+    "new balance 530", "levis 501", "carhartt veste", "ralph lauren pull",
+    "lacoste polo", "the north face doudoune", "dr martens", "patagonia polaire",
+    "tommy hilfiger pull", "nike air max", "dickies 874", "stussy",
+    "champion hoodie", "adidas firebird veste", "nike windrunner", "converse chuck 70",
+]
+
 st.set_page_config(page_title="Vinted Flip Analyzer", layout="wide")
 st.title("Vinted Flip Analyzer")
+st.caption("Scan automatique des produits qui se revendent le plus : classement par bénéfice.")
 
-query = st.text_input("Recherche", "nike air force 1")
+choix = st.multiselect("Produits à scanner (valeurs populaires en revente)", POPULAIRES,
+                       default=POPULAIRES[:8])
+perso = st.text_input("Ajouter une recherche perso (optionnel)", "")
 c1, c2 = st.columns(2)
-budget = c1.number_input("Budget max €", 1.0, 1000.0, 50.0)
-pages = c2.number_input("Pages (96 art./page)", 1, 10, 2)
+budget = c1.number_input("Budget max € par article", 1.0, 1000.0, 40.0)
+pages = c2.number_input("Pages par produit (96 art./page)", 1, 5, 1)
 c3, c4, c5 = st.columns(3)
 min_comps = c3.number_input("Comparables min", 1, 50, 3)
 pack = c4.number_input("Emballage €", 0.0, 20.0, 0.5)
 discount = c5.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
+min_fav = st.number_input("Favoris min (demande)", 0, 100, 0)
 only_profit = st.checkbox("Masquer les articles non rentables (bénéfice ≤ 0) et non estimables")
 
-if st.button("Analyser", type="primary"):
+if st.button("Scanner et analyser", type="primary"):
+    queries = list(choix) + ([perso.strip()] if perso.strip() else [])
+    if not queries:
+        st.warning("Choisis au moins un produit.")
+        st.stop()
     cfg = {"ship": 0.0, "pack": pack, "min_comps": int(min_comps), "discount": discount}
-    with st.spinner("Récupération et analyse des articles..."):
+    all_items, seen = [], set()
+    bar = st.progress(0.0)
+    status = st.empty()
+    for n, q in enumerate(queries, 1):
+        status.write(f"Scan : {q} ({n}/{len(queries)})")
         try:
-            items = fetch_items(query, budget, int(pages), st.write)
-            rows = analyze(items, cfg)
+            got = fetch_items(q, budget, int(pages), lambda m: None)
         except Exception as e:
-            st.error(f"Erreur : {e}")
-            st.stop()
+            st.write(f"{q} : erreur ({e})")
+            got = []
+        for it in got:
+            if it["id"] not in seen:
+                seen.add(it["id"])
+                it["_query"] = q
+                all_items.append(it)
+        bar.progress(n / len(queries))
+        time.sleep(1.0)
+    status.empty()
+    if not all_items:
+        st.error("Aucun article récupéré : Vinted bloque ou a changé son format.")
+        st.stop()
+    rows = analyze(all_items, cfg)
     if only_profit:
         rows = [r for r in rows if r["Bénéfice"] is not None and r["Bénéfice"] > 0]
+    if min_fav:
+        rows = [r for r in rows if (r["Favoris"] or 0) >= min_fav]
     est = sum(1 for r in rows if r["Bénéfice"] is not None)
-    st.success(f"{len(items)} articles récupérés, {len(rows)} analysés ({est} avec un bénéfice estimé).")
+    st.success(f"{len(all_items)} articles récupérés, {len(rows)} affichés ({est} avec un bénéfice estimé).")
     if rows:
         df = pd.DataFrame(rows)
         cols = ["Article", "Prix achat", "Revente estimée", "Bénéfice", "Marge %",
-                "Confiance", "Marque", "Taille", "État", "Favoris", "Lien"]
+                "Confiance", "Favoris", "Produit", "Taille", "État", "Marque", "Lien"]
         df = df[cols]
         st.dataframe(df, use_container_width=True, hide_index=True,
                      column_config={"Lien": st.column_config.LinkColumn("Lien", display_text="Ouvrir")})
