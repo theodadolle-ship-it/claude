@@ -84,6 +84,18 @@ def find_country(d):
     return ""
 
 
+def is_available(d):
+    """False si l'annonce n'a ni bouton Acheter ni Faire une offre (vendu, réservé, masqué...)."""
+    for k in ("is_closed", "is_reserved", "is_hidden", "is_draft", "is_sold"):
+        if d.get(k) is True:
+            return False
+    if d.get("transaction_permitted") is False:
+        return False
+    if d.get("can_buy") is False and not d.get("can_bargain"):
+        return False
+    return True
+
+
 def _txt(v):
     if isinstance(v, dict):
         return str(v.get("title") or v.get("name") or v.get("label") or "")
@@ -107,6 +119,7 @@ def normalize(d):
         "favourite_count": d.get("favourite_count", d.get("favorite_count", 0)),
         "url": url,
         "country": find_country(d),
+        "available": is_available(d),
     }
 
 
@@ -198,6 +211,8 @@ def analyze(items, cfg):
         title = (it.get("title") or "").lower()
         if any(d in title for d in DEFECTS) or "satisf" in str(it.get("status", "")).lower():
             continue  # état exigé : bon état, sans défaut
+        if not it.get("available", is_available(it)):
+            continue  # pas de bouton Acheter / Faire une offre
         buy = price_of(it)
         if buy <= 0:
             continue
