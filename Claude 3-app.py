@@ -120,6 +120,8 @@ def normalize(d):
         "url": url,
         "country": find_country(d),
         "available": is_available(d),
+        "_keys": sorted(d.keys()),
+        "_user": json.dumps(d.get("user") or d.get("seller") or {}, ensure_ascii=False)[:700],
         "user_id": next((h.get("id") for h in (d.get("user"), d.get("seller"))
                          if isinstance(h, dict) and h.get("id")), d.get("user_id")),
     }
@@ -185,6 +187,17 @@ def seller_country(session, uid):
         except Exception:
             continue
     return ""
+
+
+def diag_profile(session, uid):
+    out = []
+    for url in (f"{BASE}/api/v2/users/{uid}", f"https://api.vinted.fr/api/v2/users/{uid}"):
+        try:
+            r = session.get(url, timeout=20)
+            out.append(f"{url} -> HTTP {r.status_code}\n{r.text[:700]}")
+        except Exception as e:
+            out.append(f"{url} -> erreur {e}")
+    return "\n\n".join(out)
 
 
 def fetch_items(query, price_max, pages, log):
@@ -330,6 +343,7 @@ discount = c5.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
 min_fav = st.number_input("Favoris min (demande)", 0, 100, 0)
 pays_ok = st.multiselect("Pays des vendeurs acceptés", ["FR", "ES", "PT", "IT", "BE", "DE", "NL", "LU", "PL", "AT"],
                          default=["FR", "ES", "PT", "IT"])
+strict = st.checkbox("Mode strict : n'afficher que les vendeurs dont le pays est confirmé (FR, ES, PT, IT)", value=True)
 show_unknown = st.checkbox("Afficher aussi les articles sans estimation de bénéfice")
 
 if st.button("Scanner et analyser", type="primary"):
@@ -382,6 +396,7 @@ if st.button("Scanner et analyser", type="primary"):
                 if not r["Pays"] and r["_uid"] in cache:
                     r["Pays"] = cache[r["_uid"]]
             ok = sum(1 for v in cache.values() if v)
+            st.info(f"Profils vendeurs : {ok} pays lus sur {len(todo)} vérifiés.")
             if ok == 0:
                 st.warning("Impossible de lire le pays sur les profils vendeurs (Vinted bloque l'accès).")
         except Exception as e:
@@ -389,11 +404,28 @@ if st.button("Scanner et analyser", type="primary"):
         status2.empty()
         bar2.empty()
     rows = [r for r in rows if r["Pays"] != "US"]  # États-Unis : toujours supprimés
-    if any(r["Pays"] for r in rows):
+    if strict:
+        rows = [r for r in rows if r["Pays"] in pays_ok]
+        if not rows:
+            st.warning("Aucun article avec un pays de vendeur confirmé. Ouvre le bloc Diagnostic "
+                       "ci-dessous et envoie-moi une capture.")
+    elif any(r["Pays"] for r in rows):
         rows = [r for r in rows if r["Pays"] in pays_ok]
     else:
         st.warning("Vinted ne fournit pas le pays du vendeur dans ces données : le filtre par pays "
                    "n'a pas pu s'appliquer. Vérifie le pays sur l'annonce avant d'acheter.")
+    with st.expander("Diagnostic (à m'envoyer en capture si le filtre pays ne marche pas)"):
+        st.write(f"Articles avec pays connu : {sum(1 for i in all_items if i.get('country'))} / {len(all_items)}")
+        for it in all_items[:2]:
+            st.code(f"Champs article : {it.get('_keys')}\nVendeur : {it.get('_user')}")
+        uid0 = next((i.get("user_id") for i in all_items if i.get("user_id")), None)
+        if uid0:
+            try:
+                st.code(diag_profile(make_session(), uid0))
+            except Exception as e:
+                st.code(f"Erreur : {e}")
+        else:
+            st.write("Aucun identifiant vendeur trouvé dans les données.")
     est = sum(1 for r in rows if r["Bénéfice"] is not None)
     st.success(f"{len(all_items)} articles récupérés, {len(rows)} affichés ({est} avec un bénéfice estimé).")
     if rows:
