@@ -76,13 +76,29 @@ def fetch_items(query, price_max, pages, log):
             params.append(("price_to", price_max))
         for sid in STATUS_IDS:
             params.append(("status_ids[]", sid))
+        batch = []
+        # Essai 1 : page catalogue (HTML)
         r = s.get(f"{BASE}/catalog", params=params, timeout=25)
-        if r.status_code != 200:
-            log(f"Erreur HTTP {r.status_code} (Vinted bloque peut-être les requêtes).")
-            break
-        batch = extract_items(r.text)
+        if r.status_code == 200:
+            batch = extract_items(r.text)
+        else:
+            log(f"Catalogue HTML : HTTP {r.status_code}")
+        # Essai 2 : passerelle JSON (autre route utilisée par le site)
         if not batch:
-            log("Aucun article lu : Vinted a peut-être changé le format de page.")
+            p2 = [("search_text", query), ("page", page), ("per_page", 96),
+                  ("order", "newest_first")]
+            if price_max:
+                p2.append(("price_to", price_max))
+            for host in ("https://api.vinted.fr/svc-catalogue/items",
+                         f"{BASE}/svc-catalogue/items"):
+                r2 = s.get(host, params=p2, timeout=25)
+                if r2.status_code == 200:
+                    batch = extract_items(r2.text)
+                    if batch:
+                        break
+                log(f"{host.split('/')[2]} : HTTP {r2.status_code}")
+        if not batch:
+            log(f"Aucun article récupéré (page {page}). Vinted bloque ou a changé son format.")
             break
         items.extend(batch)
         log(f"Page {page} : {len(batch)} articles")
@@ -100,6 +116,8 @@ def analyze(items, cfg):
     for it in items:
         title = (it.get("title") or "").lower()
         if any(d in title for d in DEFECTS):
+            continue
+        if "satisf" in str(it.get("status", "")).lower():
             continue
         buy = price_of(it)
         if buy <= 0:
