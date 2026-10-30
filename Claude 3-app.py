@@ -1,3 +1,4 @@
+import time
 import json
 import re
 import statistics
@@ -109,12 +110,17 @@ def normalize(d):
     url = d.get("url") or d.get("path") or f"/items/{d.get('id')}"
     if url.startswith("/"):
         url = BASE + url
+    box = d.get("item_box") if isinstance(d.get("item_box"), dict) else {}
+    first = _txt(box.get("first_line"))
+    second = _txt(box.get("second_line"))
+    parts = [p.strip() for p in re.split(r"[·•|]", second) if p.strip()]
     return {
         "id": d.get("id"),
         "title": _txt(d.get("title") or d.get("name")),
-        "brand_title": _txt(d.get("brand_title") or d.get("brand")),
-        "size_title": _txt(d.get("size_title") or d.get("size")),
-        "status": _txt(d.get("status") or d.get("condition")),
+        "brand_title": _txt(d.get("brand_title") or d.get("brand")) or first,
+        "size_title": _txt(d.get("size_title") or d.get("size")) or (parts[0] if parts else ""),
+        "status": _txt(d.get("status") or d.get("condition")) or (parts[1] if len(parts) > 1 else ""),
+        "_box": json.dumps(box, ensure_ascii=False)[:600],
         "price": price,
         "favourite_count": d.get("favourite_count", d.get("favorite_count", 0)),
         "url": url,
@@ -169,29 +175,41 @@ def make_session():
     return s
 
 
+RATE = {"429": 0}
+
+
 def seller_country(session, uid):
-    """Ouvre le profil du vendeur et renvoie son pays (code ISO) ou ''."""
-    for url in (f"{BASE}/api/v2/users/{uid}", f"https://api.vinted.fr/api/v2/users/{uid}"):
+    """Ouvre le profil du vendeur et renvoie son pays (code ISO) ou ''. Réessaie si limite de débit."""
+    url = f"{BASE}/api/v2/users/{uid}"
+    for attempt in range(4):
         try:
             r = session.get(url, timeout=20)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            user = data.get("user", data) if isinstance(data, dict) else {}
-            c = find_country({"user": user}) or find_country(user)
-            if c:
-                return c
-            blob = json.dumps(user, ensure_ascii=False).lower()
-            if any(m in blob for m in ("états-unis", "etats-unis", "united states")):
-                return "US"
         except Exception:
+            return ""
+        if r.status_code == 429:
+            RATE["429"] += 1
+            time.sleep(4 * (attempt + 1))
             continue
+        if r.status_code != 200:
+            return ""
+        try:
+            data = r.json()
+        except ValueError:
+            return ""
+        user = data.get("user", data) if isinstance(data, dict) else {}
+        c = find_country({"user": user}) or find_country(user)
+        if c:
+            return c
+        blob = json.dumps(user, ensure_ascii=False).lower()
+        if any(m in blob for m in ("états-unis", "etats-unis", "united states")):
+            return "US"
+        return ""
     return ""
 
 
 def diag_profile(session, uid):
     out = []
-    for url in (f"{BASE}/api/v2/users/{uid}", f"https://api.vinted.fr/api/v2/users/{uid}"):
+    for url in (f"{BASE}/api/v2/users/{uid}",):
         try:
             r = session.get(url, timeout=20)
             out.append(f"{url} -> HTTP {r.status_code}\n{r.text[:700]}")
@@ -341,6 +359,7 @@ min_comps = c3.number_input("Comparables min", 1, 50, 3)
 pack = c4.number_input("Emballage €", 0.0, 20.0, 0.5)
 discount = c5.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
 min_fav = st.number_input("Favoris min (demande)", 0, 100, 0)
+max_checks = st.number_input("Vendeurs à vérifier (≈2 s chacun, du plus gros bénéfice au plus petit)", 5, 200, 40)
 pays_ok = st.multiselect("Pays des vendeurs acceptés", ["FR", "ES", "PT", "IT", "BE", "DE", "NL", "LU", "PL", "AT"],
                          default=["FR", "ES", "PT", "IT"])
 strict = st.checkbox("Mode strict : n'afficher que les vendeurs dont le pays est confirmé (FR, ES, PT, IT)", value=True)
@@ -379,30 +398,33 @@ if st.button("Scanner et analyser", type="primary"):
             or (show_unknown and r["Bénéfice"] is None)]
     if min_fav:
         rows = [r for r in rows if (r["Favoris"] or 0) >= min_fav]
-    # Ouvre le profil de chaque vendeur dont le pays est inconnu
-    todo = sorted({r["_uid"] for r in rows if not r["Pays"] and r["_uid"]})[:200]
-    if todo:
+    # Ouvre le profil des vendeurs, du plus gros bénéfice au plus petit (lent pour éviter le blocage)
+    cache, checked = {}, 0
+    uids = []
+    for r in rows:
+        if not r["Pays"] and r["_uid"] and r["_uid"] not in uids:
+            uids.append(r["_uid"])
+    uids = uids[:int(max_checks)]
+    if uids:
         status2 = st.empty()
         bar2 = st.progress(0.0)
         try:
             sess = make_session()
-            cache = {}
-            for n, uid in enumerate(todo, 1):
-                status2.write(f"Vérification des profils vendeurs ({n}/{len(todo)})")
+            for n, uid in enumerate(uids, 1):
+                status2.write(f"Vérification des profils vendeurs ({n}/{len(uids)})")
                 cache[uid] = seller_country(sess, uid)
-                bar2.progress(n / len(todo))
-                time.sleep(0.4)
-            for r in rows:
-                if not r["Pays"] and r["_uid"] in cache:
-                    r["Pays"] = cache[r["_uid"]]
-            ok = sum(1 for v in cache.values() if v)
-            st.info(f"Profils vendeurs : {ok} pays lus sur {len(todo)} vérifiés.")
-            if ok == 0:
-                st.warning("Impossible de lire le pays sur les profils vendeurs (Vinted bloque l'accès).")
-        except Exception as e:
-            st.warning(f"Vérification des profils impossible : {e}")
+                bar2.progress(n / len(uids))
+                time.sleep(1.5)
+        except Exception as ex:
+            st.warning(f"Vérification des profils interrompue : {ex}")
         status2.empty()
         bar2.empty()
+        ok = sum(1 for v in cache.values() if v)
+        st.info(f"Profils vendeurs : {ok} pays lus sur {len(uids)} vérifiés"
+                + (f" ({RATE['429']} limitations de débit rencontrées)" if RATE["429"] else "") + ".")
+        for r in rows:
+            if not r["Pays"] and r["_uid"] in cache:
+                r["Pays"] = cache[r["_uid"]]
     rows = [r for r in rows if r["Pays"] != "US"]  # États-Unis : toujours supprimés
     if strict:
         rows = [r for r in rows if r["Pays"] in pays_ok]
@@ -417,7 +439,7 @@ if st.button("Scanner et analyser", type="primary"):
     with st.expander("Diagnostic (à m'envoyer en capture si le filtre pays ne marche pas)"):
         st.write(f"Articles avec pays connu : {sum(1 for i in all_items if i.get('country'))} / {len(all_items)}")
         for it in all_items[:2]:
-            st.code(f"Champs article : {it.get('_keys')}\nVendeur : {it.get('_user')}")
+            st.code(f"Champs article : {it.get('_keys')}\nVendeur : {it.get('_user')}\nitem_box : {it.get('_box')}\nMarque/taille/état lus : {it.get('brand_title')} / {it.get('size_title')} / {it.get('status')}")
         uid0 = next((i.get("user_id") for i in all_items if i.get("user_id")), None)
         if uid0:
             try:
