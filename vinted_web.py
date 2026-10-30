@@ -97,6 +97,16 @@ def is_available(d):
     return True
 
 
+DOMAINES = {"fr": "FR", "es": "ES", "pt": "PT", "it": "IT", "com": "US", "co.uk": "GB", "de": "DE",
+            "be": "BE", "nl": "NL", "lu": "LU", "pl": "PL", "at": "AT", "lt": "LT", "cz": "CZ"}
+
+
+def domain_of(url):
+    """Extension du site Vinted d'une annonce absolue (fr, es, com...) ou ''."""
+    m = re.match(r"https?://(?:www\.)?vinted\.([a-z.]+)/", str(url or ""))
+    return m.group(1) if m else ""
+
+
 def _txt(v):
     if isinstance(v, dict):
         return str(v.get("title") or v.get("name") or v.get("label") or "")
@@ -108,6 +118,7 @@ def normalize(d):
     if price is None:
         price = d.get("total_item_price") or d.get("price_numeric")
     url = d.get("url") or d.get("path") or f"/items/{d.get('id')}"
+    is_abs = str(url).startswith("http")
     if url.startswith("/"):
         url = BASE + url
     box = d.get("item_box") if isinstance(d.get("item_box"), dict) else {}
@@ -126,6 +137,7 @@ def normalize(d):
         "url": url,
         "country": find_country(d),
         "available": is_available(d),
+        "_abs": is_abs,
         "_keys": sorted(d.keys()),
         "_user": json.dumps(d.get("user") or d.get("seller") or {}, ensure_ascii=False)[:700],
         "user_id": next((h.get("id") for h in (d.get("user"), d.get("seller"))
@@ -291,6 +303,7 @@ def analyze(items, cfg):
             "Article": it.get("title", ""), "Marque": it.get("brand_title", ""),
             "Taille": it.get("size_title", ""), "État": it.get("status", ""),
             "Produit": it.get("_query", ""),
+            "Domaine": domain_of(it.get("url")) if it.get("_abs", True) else "",
             "Pays": it.get("country") or find_country(it),
             "_uid": it.get("user_id") or next((h.get("id") for h in (it.get("user"), it.get("seller"))
                                                if isinstance(h, dict) and h.get("id")), None),
@@ -406,6 +419,15 @@ if st.button("Scanner et analyser", type="primary"):
             or (show_unknown and r["Bénéfice"] is None)]
     if min_fav:
         rows = [r for r in rows if (r["Favoris"] or 0) >= min_fav]
+    # Domaine de l'annonce (vinted.fr, .es, .pt, .it, .com...) : .com = vendeur américain
+    from collections import Counter
+    doms = Counter(r["Domaine"] or "inconnu" for r in rows)
+    st.info("Sites Vinted des annonces : " + ", ".join(f"{k} : {v}" for k, v in doms.most_common()))
+    for r in rows:
+        if r["Domaine"] and not r["Pays"]:
+            c = DOMAINES.get(r["Domaine"], r["Domaine"].upper())
+            if c not in ("FR", "ES", "PT", "IT"):
+                r["Pays"] = c  # vendeur d'un autre site (ex. .com = États-Unis)
     # Pays déjà connus (mémoire des scans précédents)
     for r in rows:
         if not r["Pays"] and r["_uid"] in MEMOIRE:
@@ -475,7 +497,7 @@ if st.button("Scanner et analyser", type="primary"):
     if rows:
         df = pd.DataFrame(rows)
         cols = ["Article", "Prix achat", "Revente estimée", "Bénéfice", "Marge %",
-                "Confiance", "Pays", "Favoris", "Produit", "Taille", "État", "Marque", "Lien", "Vendeur"]
+                "Confiance", "Pays", "Domaine", "Favoris", "Produit", "Taille", "État", "Marque", "Lien", "Vendeur"]
         df = df[cols]
         df["Pays"] = df["Pays"].replace("", "?")
         st.dataframe(df, use_container_width=True, hide_index=True,
