@@ -56,7 +56,8 @@ def extract_items(html):
     return found
 
 
-PAYS_NOMS = {"france": "FR", "espagne": "ES", "spain": "ES", "españa": "ES", "espana": "ES",
+PAYS_NOMS = {"états-unis": "US", "etats-unis": "US", "états unis": "US", "etats unis": "US",
+             "united states": "US", "usa": "US", "france": "FR", "espagne": "ES", "spain": "ES", "españa": "ES", "espana": "ES",
              "portugal": "PT", "italie": "IT", "italy": "IT", "italia": "IT",
              "belgique": "BE", "belgium": "BE", "allemagne": "DE", "germany": "DE",
              "pays-bas": "NL", "netherlands": "NL", "luxembourg": "LU", "pologne": "PL",
@@ -74,6 +75,12 @@ def find_country(d):
                 if v:
                     v = str(v).strip()
                     return v.upper() if len(v) == 2 else PAYS_NOMS.get(v.lower(), v.upper())
+    # pas de champ pays : cherche une mention des États-Unis dans les infos du vendeur
+    for holder in (d.get("user"), d.get("seller")):
+        if isinstance(holder, dict):
+            blob = json.dumps(holder, ensure_ascii=False).lower()
+            if any(m in blob for m in ("états-unis", "etats-unis", "états unis", "united states")):
+                return "US"
     return ""
 
 
@@ -303,6 +310,7 @@ if st.button("Scanner et analyser", type="primary"):
             or (show_unknown and r["Bénéfice"] is None)]
     if min_fav:
         rows = [r for r in rows if (r["Favoris"] or 0) >= min_fav]
+    rows = [r for r in rows if r["Pays"] != "US"]  # États-Unis : toujours supprimés
     if any(r["Pays"] for r in rows):
         rows = [r for r in rows if r["Pays"] in pays_ok]
     else:
