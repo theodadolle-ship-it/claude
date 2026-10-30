@@ -120,6 +120,8 @@ def normalize(d):
         "url": url,
         "country": find_country(d),
         "available": is_available(d),
+        "user_id": next((h.get("id") for h in (d.get("user"), d.get("seller"))
+                         if isinstance(h, dict) and h.get("id")), d.get("user_id")),
     }
 
 
@@ -147,6 +149,42 @@ def extract_json(text):
 
     walk(data)
     return found
+
+
+def make_session():
+    try:
+        from curl_cffi import requests as cr
+        s = cr.Session(impersonate="chrome")
+    except ImportError:
+        s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "fr-FR,fr;q=0.9",
+    })
+    s.get(BASE, timeout=20)
+    return s
+
+
+def seller_country(session, uid):
+    """Ouvre le profil du vendeur et renvoie son pays (code ISO) ou ''."""
+    for url in (f"{BASE}/api/v2/users/{uid}", f"https://api.vinted.fr/api/v2/users/{uid}"):
+        try:
+            r = session.get(url, timeout=20)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            user = data.get("user", data) if isinstance(data, dict) else {}
+            c = find_country({"user": user}) or find_country(user)
+            if c:
+                return c
+            blob = json.dumps(user, ensure_ascii=False).lower()
+            if any(m in blob for m in ("états-unis", "etats-unis", "united states")):
+                return "US"
+        except Exception:
+            continue
+    return ""
 
 
 def fetch_items(query, price_max, pages, log):
@@ -223,6 +261,8 @@ def analyze(items, cfg):
             "Taille": it.get("size_title", ""), "État": it.get("status", ""),
             "Produit": it.get("_query", ""),
             "Pays": it.get("country") or find_country(it),
+            "_uid": it.get("user_id") or next((h.get("id") for h in (it.get("user"), it.get("seller"))
+                                               if isinstance(h, dict) and h.get("id")), None),
             "Prix achat": round(buy, 2), "Revente estimée": None, "Bénéfice": None,
             "Marge %": None, "Favoris": it.get("favourite_count", 0),
             "Confiance": f"insuffisante ({len(others)})",
@@ -325,6 +365,29 @@ if st.button("Scanner et analyser", type="primary"):
             or (show_unknown and r["Bénéfice"] is None)]
     if min_fav:
         rows = [r for r in rows if (r["Favoris"] or 0) >= min_fav]
+    # Ouvre le profil de chaque vendeur dont le pays est inconnu
+    todo = sorted({r["_uid"] for r in rows if not r["Pays"] and r["_uid"]})[:200]
+    if todo:
+        status2 = st.empty()
+        bar2 = st.progress(0.0)
+        try:
+            sess = make_session()
+            cache = {}
+            for n, uid in enumerate(todo, 1):
+                status2.write(f"Vérification des profils vendeurs ({n}/{len(todo)})")
+                cache[uid] = seller_country(sess, uid)
+                bar2.progress(n / len(todo))
+                time.sleep(0.4)
+            for r in rows:
+                if not r["Pays"] and r["_uid"] in cache:
+                    r["Pays"] = cache[r["_uid"]]
+            ok = sum(1 for v in cache.values() if v)
+            if ok == 0:
+                st.warning("Impossible de lire le pays sur les profils vendeurs (Vinted bloque l'accès).")
+        except Exception as e:
+            st.warning(f"Vérification des profils impossible : {e}")
+        status2.empty()
+        bar2.empty()
     rows = [r for r in rows if r["Pays"] != "US"]  # États-Unis : toujours supprimés
     if any(r["Pays"] for r in rows):
         rows = [r for r in rows if r["Pays"] in pays_ok]
