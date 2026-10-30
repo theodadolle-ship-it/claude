@@ -56,6 +56,27 @@ def extract_items(html):
     return found
 
 
+PAYS_NOMS = {"france": "FR", "espagne": "ES", "spain": "ES", "españa": "ES", "espana": "ES",
+             "portugal": "PT", "italie": "IT", "italy": "IT", "italia": "IT",
+             "belgique": "BE", "belgium": "BE", "allemagne": "DE", "germany": "DE",
+             "pays-bas": "NL", "netherlands": "NL", "luxembourg": "LU", "pologne": "PL",
+             "poland": "PL", "autriche": "AT", "austria": "AT"}
+
+
+def find_country(d):
+    """Pays du vendeur (code ISO sur 2 lettres) si Vinted le fournit, sinon ''."""
+    for holder in (d, d.get("user"), d.get("seller")):
+        if isinstance(holder, dict):
+            for k in ("country_iso_code", "country_code", "country_iso", "country"):
+                v = holder.get(k)
+                if isinstance(v, dict):
+                    v = v.get("iso_code") or v.get("code") or v.get("title")
+                if v:
+                    v = str(v).strip()
+                    return v.upper() if len(v) == 2 else PAYS_NOMS.get(v.lower(), v.upper())
+    return ""
+
+
 def _txt(v):
     if isinstance(v, dict):
         return str(v.get("title") or v.get("name") or v.get("label") or "")
@@ -78,6 +99,7 @@ def normalize(d):
         "price": price,
         "favourite_count": d.get("favourite_count", d.get("favorite_count", 0)),
         "url": url,
+        "country": find_country(d),
     }
 
 
@@ -178,6 +200,7 @@ def analyze(items, cfg):
             "Article": it.get("title", ""), "Marque": it.get("brand_title", ""),
             "Taille": it.get("size_title", ""), "État": it.get("status", ""),
             "Produit": it.get("_query", ""),
+            "Pays": it.get("country") or find_country(it),
             "Prix achat": round(buy, 2), "Revente estimée": None, "Bénéfice": None,
             "Marge %": None, "Favoris": it.get("favourite_count", 0),
             "Confiance": f"insuffisante ({len(others)})",
@@ -243,6 +266,8 @@ min_comps = c3.number_input("Comparables min", 1, 50, 3)
 pack = c4.number_input("Emballage €", 0.0, 20.0, 0.5)
 discount = c5.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
 min_fav = st.number_input("Favoris min (demande)", 0, 100, 0)
+pays_ok = st.multiselect("Pays des vendeurs acceptés", ["FR", "ES", "PT", "IT", "BE", "DE", "NL", "LU", "PL", "AT"],
+                         default=["FR", "ES", "PT", "IT"])
 show_unknown = st.checkbox("Afficher aussi les articles sans estimation de bénéfice")
 
 if st.button("Scanner et analyser", type="primary"):
@@ -278,12 +303,17 @@ if st.button("Scanner et analyser", type="primary"):
             or (show_unknown and r["Bénéfice"] is None)]
     if min_fav:
         rows = [r for r in rows if (r["Favoris"] or 0) >= min_fav]
+    if any(r["Pays"] for r in rows):
+        rows = [r for r in rows if r["Pays"] in pays_ok]
+    else:
+        st.warning("Vinted ne fournit pas le pays du vendeur dans ces données : le filtre par pays "
+                   "n'a pas pu s'appliquer. Vérifie le pays sur l'annonce avant d'acheter.")
     est = sum(1 for r in rows if r["Bénéfice"] is not None)
     st.success(f"{len(all_items)} articles récupérés, {len(rows)} affichés ({est} avec un bénéfice estimé).")
     if rows:
         df = pd.DataFrame(rows)
         cols = ["Article", "Prix achat", "Revente estimée", "Bénéfice", "Marge %",
-                "Confiance", "Favoris", "Produit", "Taille", "État", "Marque", "Lien"]
+                "Confiance", "Pays", "Favoris", "Produit", "Taille", "État", "Marque", "Lien"]
         df = df[cols]
         st.dataframe(df, use_container_width=True, hide_index=True,
                      column_config={"Lien": st.column_config.LinkColumn("Lien", display_text="Ouvrir")})
