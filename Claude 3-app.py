@@ -158,47 +158,44 @@ def fetch_items(query, price_max, pages, log):
 
 
 def analyze(items, cfg):
-    # groupes de comparables : même marque + même taille
+    """Analyse TOUS les articles : prix de revente estimé, bénéfice, classés du plus haut au plus bas."""
     groups = {}
     for it in items:
         key = (it.get("brand_title", "").lower(), it.get("size_title", "").lower())
-        groups.setdefault(key, []).append(price_of(it))
+        groups.setdefault(key, []).append((it.get("id"), price_of(it)))
 
     rows = []
     for it in items:
         title = (it.get("title") or "").lower()
-        if any(d in title for d in DEFECTS):
-            continue
-        if "satisf" in str(it.get("status", "")).lower():
-            continue
+        if any(d in title for d in DEFECTS) or "satisf" in str(it.get("status", "")).lower():
+            continue  # état exigé : bon état, sans défaut
         buy = price_of(it)
         if buy <= 0:
             continue
         key = (it.get("brand_title", "").lower(), it.get("size_title", "").lower())
-        if not key[0]:
-            continue
-        comps = groups[key]
-        if len(comps) < cfg["min_comps"]:
-            continue
-        resale = statistics.median(comps) * cfg["discount"]
-        cost = buy + cfg["ship"] + cfg["pack"]
-        profit = resale - cost
-        margin = profit / cost * 100 if cost else 0
-        if profit < cfg["min_profit"] or margin < cfg["min_margin"]:
-            continue
-        n = len(comps)
-        conf = "élevé" if n >= 10 else "moyen" if n >= 5 else "faible"
-        rows.append({
+        others = [p for i, p in groups.get(key, []) if i != it.get("id") and p > 0] if key[0] else []
+        row = {
             "Article": it.get("title", ""), "Marque": it.get("brand_title", ""),
             "Taille": it.get("size_title", ""), "État": it.get("status", ""),
-            "Prix achat": round(buy, 2), "Revente estimée": round(resale, 2),
-            "Bénéfice": round(profit, 2), "Marge %": round(margin, 1),
-            "Favoris": it.get("favourite_count", 0), "Confiance": f"{conf} ({n})",
+            "Prix achat": round(buy, 2), "Revente estimée": None, "Bénéfice": None,
+            "Marge %": None, "Favoris": it.get("favourite_count", 0),
+            "Confiance": f"insuffisante ({len(others)})",
             "Lien": it.get("url") or f"{BASE}/items/{it.get('id')}",
-        })
-    rows.sort(key=lambda r: r["Bénéfice"], reverse=True)
+        }
+        if len(others) >= cfg["min_comps"]:
+            resale = statistics.median(others) * cfg["discount"]
+            cost = buy + cfg["ship"] + cfg["pack"]
+            profit = resale - cost
+            n = len(others)
+            row.update({
+                "Revente estimée": round(resale, 2), "Bénéfice": round(profit, 2),
+                "Marge %": round(profit / cost * 100, 1) if cost else None,
+                "Confiance": ("élevée" if n >= 10 else "moyenne" if n >= 5 else "faible") + f" ({n})",
+            })
+        rows.append(row)
+    # tri : bénéfice du plus haut au plus bas, les articles non estimables en dernier
+    rows.sort(key=lambda r: (r["Bénéfice"] is None, -(r["Bénéfice"] or 0)))
     return rows
-
 
 
 import pandas as pd
@@ -207,33 +204,35 @@ import streamlit as st
 st.set_page_config(page_title="Vinted Flip Analyzer", layout="wide")
 st.title("Vinted Flip Analyzer")
 
-c1, c2, c3 = st.columns(3)
-query = c1.text_input("Recherche", "nike hoodie")
-budget = c2.number_input("Budget max €", 1.0, 1000.0, 20.0)
-pages = c3.number_input("Pages (96 art./page)", 1, 10, 2)
-c4, c5, c6 = st.columns(3)
-min_profit = c4.number_input("Bénéfice min €", 0.0, 500.0, 8.0)
-min_margin = c5.number_input("Marge min %", 0.0, 500.0, 40.0)
-min_comps = c6.number_input("Comparables min", 1, 50, 3)
-c7, c8 = st.columns(2)
-pack = c7.number_input("Emballage €", 0.0, 20.0, 0.5)
-discount = c8.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
-ship = 0.0
+query = st.text_input("Recherche", "nike air force 1")
+c1, c2 = st.columns(2)
+budget = c1.number_input("Budget max €", 1.0, 1000.0, 50.0)
+pages = c2.number_input("Pages (96 art./page)", 1, 10, 2)
+c3, c4, c5 = st.columns(3)
+min_comps = c3.number_input("Comparables min", 1, 50, 3)
+pack = c4.number_input("Emballage €", 0.0, 20.0, 0.5)
+discount = c5.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
+only_profit = st.checkbox("Masquer les articles non rentables (bénéfice ≤ 0) et non estimables")
 
 if st.button("Analyser", type="primary"):
-    cfg = {"min_profit": min_profit, "min_margin": min_margin, "ship": ship,
-           "pack": pack, "min_comps": int(min_comps), "discount": discount}
-    with st.spinner("Récupération des articles..."):
+    cfg = {"ship": 0.0, "pack": pack, "min_comps": int(min_comps), "discount": discount}
+    with st.spinner("Récupération et analyse des articles..."):
         try:
             items = fetch_items(query, budget, int(pages), st.write)
             rows = analyze(items, cfg)
         except Exception as e:
             st.error(f"Erreur : {e}")
             st.stop()
-    st.success(f"{len(items)} articles analysés, {len(rows)} opportunités.")
+    if only_profit:
+        rows = [r for r in rows if r["Bénéfice"] is not None and r["Bénéfice"] > 0]
+    est = sum(1 for r in rows if r["Bénéfice"] is not None)
+    st.success(f"{len(items)} articles récupérés, {len(rows)} analysés ({est} avec un bénéfice estimé).")
     if rows:
         df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True,
-                     column_config={"Lien": st.column_config.LinkColumn("Lien")})
+        cols = ["Article", "Prix achat", "Revente estimée", "Bénéfice", "Marge %",
+                "Confiance", "Marque", "Taille", "État", "Favoris", "Lien"]
+        df = df[cols]
+        st.dataframe(df, use_container_width=True, hide_index=True,
+                     column_config={"Lien": st.column_config.LinkColumn("Lien", display_text="Ouvrir")})
         st.download_button("Exporter CSV", df.to_csv(index=False, sep=";").encode("utf-8-sig"),
                            "vinted.csv", "text/csv")
