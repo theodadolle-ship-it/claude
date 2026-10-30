@@ -219,6 +219,39 @@ def seller_country(session, uid):
     return ""
 
 
+DIAG = {}
+
+
+def check_item(session, item_id):
+    """Ouvre la page article vue depuis la France : ('ok', pays) / ('absent', '') / ('limit', '') / ('error', '')."""
+    url = f"{BASE}/api/v2/items/{item_id}?localize=false"
+    for attempt in range(3):
+        try:
+            r = session.get(url, timeout=20)
+        except Exception:
+            return ("error", "")
+        DIAG.setdefault("item", f"HTTP {r.status_code} : {r.text[:500]}")
+        if r.status_code == 429:
+            time.sleep(4 * (attempt + 1))
+            continue
+        if r.status_code in (404, 410):
+            return ("absent", "")
+        if r.status_code != 200:
+            return ("error", "")
+        try:
+            data = r.json()
+        except ValueError:
+            return ("error", "")
+        item = data.get("item", data) if isinstance(data, dict) else {}
+        if not isinstance(item, dict) or not item:
+            return ("error", "")
+        if not is_available(item):
+            return ("absent", "")
+        c = find_country(item) or find_country({"user": item.get("user") or {}})
+        return ("ok", c)
+    return ("limit", "")
+
+
 def diag_profile(session, uid):
     out = []
     for url in (f"{BASE}/api/v2/users/{uid}",):
@@ -303,6 +336,7 @@ def analyze(items, cfg):
             "Article": it.get("title", ""), "Marque": it.get("brand_title", ""),
             "Taille": it.get("size_title", ""), "État": it.get("status", ""),
             "Produit": it.get("_query", ""),
+            "_id": it.get("id"),
             "Domaine": domain_of(it.get("url")) if it.get("_abs", True) else "",
             "Pays": it.get("country") or find_country(it),
             "_uid": it.get("user_id") or next((h.get("id") for h in (it.get("user"), it.get("seller"))
@@ -380,10 +414,10 @@ min_comps = c3.number_input("Comparables min", 1, 50, 3)
 discount = c4.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
 pack = 0.0
 min_fav = st.number_input("Favoris min (demande)", 0, 100, 0)
-max_checks = st.number_input("Vendeurs à vérifier par scan (≈3 s chacun, du plus gros bénéfice au plus petit)", 5, 200, 25)
+max_checks = st.number_input("Pages article à vérifier par scan (≈3 s chacune, du plus gros bénéfice au plus petit)", 5, 300, 40)
 pays_ok = st.multiselect("Pays des vendeurs acceptés", ["FR", "ES", "PT", "IT", "BE", "DE", "NL", "LU", "PL", "AT"],
                          default=["FR", "ES", "PT", "IT"])
-strict = st.checkbox("Mode strict : n'afficher que les vendeurs dont le pays est confirmé (FR, ES, PT, IT)", value=False)
+strict = st.checkbox("Mode strict : n'afficher que les articles dont la page est vérifiée depuis la France", value=False)
 show_unknown = st.checkbox("Afficher aussi les articles sans estimation de bénéfice")
 
 if st.button("Scanner et analyser", type="primary"):
@@ -428,50 +462,53 @@ if st.button("Scanner et analyser", type="primary"):
             c = DOMAINES.get(r["Domaine"], r["Domaine"].upper())
             if c not in ("FR", "ES", "PT", "IT"):
                 r["Pays"] = c  # vendeur d'un autre site (ex. .com = États-Unis)
-    # Pays déjà connus (mémoire des scans précédents)
+    # Vérifie la page de chaque article vue depuis la France (du plus gros bénéfice au plus petit)
     for r in rows:
-        if not r["Pays"] and r["_uid"] in MEMOIRE:
-            r["Pays"] = MEMOIRE[r["_uid"]]
-    # Ouvre le profil des nouveaux vendeurs, du plus gros bénéfice au plus petit (lent, pour éviter le blocage)
-    uids = []
-    for r in rows:
-        if not r["Pays"] and r["_uid"] and r["_uid"] not in uids:
-            uids.append(r["_uid"])
-    uids = uids[:int(max_checks)]
-    if uids:
+        m = MEMOIRE.get(f"i{r['_id']}")
+        if m:
+            r["Verif"], c = m
+            if c and not r["Pays"]:
+                r["Pays"] = c
+        else:
+            r["Verif"] = ""
+    todo = [r for r in rows if not r["Verif"]][:int(max_checks)]
+    if todo:
         status2 = st.empty()
         bar2 = st.progress(0.0)
-        lus, fails, stopped = 0, 0, False
+        fails, stopped = 0, False
         try:
             sess = make_session()
-            for n, uid in enumerate(uids, 1):
-                status2.write(f"Vérification des profils vendeurs ({n}/{len(uids)})")
-                c = seller_country(sess, uid)
-                if c:
-                    MEMOIRE[uid] = c
-                    lus += 1
+            for n, r in enumerate(todo, 1):
+                status2.write(f"Vérification des pages article ({n}/{len(todo)})")
+                st_, c = check_item(sess, r["_id"])
+                if st_ in ("ok", "absent"):
+                    MEMOIRE[f"i{r['_id']}"] = (st_, c)
+                    r["Verif"] = st_
+                    if c and not r["Pays"]:
+                        r["Pays"] = c
                     fails = 0
                 else:
                     fails += 1
                     if fails >= 3:
                         stopped = True
                         break
-                bar2.progress(n / len(uids))
-                time.sleep(3.0)
+                bar2.progress(n / len(todo))
+                time.sleep(2.5)
         except Exception as ex:
-            st.warning(f"Vérification des profils interrompue : {ex}")
+            st.warning(f"Vérification interrompue : {ex}")
         status2.empty()
         bar2.empty()
-        st.info(f"Profils vendeurs : {lus} pays lus ce scan, {len(MEMOIRE)} vendeurs en mémoire au total.")
         if stopped:
             st.warning("Vinted limite les requêtes : arrêt de la vérification. Attends 5 à 10 minutes puis "
-                       "relance un scan : les vendeurs déjà lus sont gardés en mémoire.")
-        for r in rows:
-            if not r["Pays"] and r["_uid"] in MEMOIRE:
-                r["Pays"] = MEMOIRE[r["_uid"]]
+                       "relance : les articles déjà vérifiés sont gardés en mémoire.")
+    n_ok = sum(1 for r in rows if r["Verif"] == "ok")
+    n_abs = sum(1 for r in rows if r["Verif"] == "absent")
+    st.info(f"Pages article : {n_ok} accessibles depuis la France, {n_abs} inaccessibles ou sans bouton "
+            f"(supprimées), {sum(1 for r in rows if not r['Verif'])} non vérifiées.")
+    rows = [r for r in rows if r["Verif"] != "absent"]
     rows = [r for r in rows if r["Pays"] != "US"]  # États-Unis : toujours supprimés
     if strict:
-        rows = [r for r in rows if r["Pays"] in pays_ok]
+        rows = [r for r in rows if r["Verif"] == "ok" and (not r["Pays"] or r["Pays"] in pays_ok)]
         if not rows:
             st.warning("Aucun article avec un pays de vendeur confirmé. Ouvre le bloc Diagnostic "
                        "ci-dessous et envoie-moi une capture.")
@@ -484,6 +521,7 @@ if st.button("Scanner et analyser", type="primary"):
         st.write(f"Articles avec pays connu : {sum(1 for i in all_items if i.get('country'))} / {len(all_items)}")
         for it in all_items[:2]:
             st.code(f"Champs article : {it.get('_keys')}\nVendeur : {it.get('_user')}\nitem_box : {it.get('_box')}\nMarque/taille/état lus : {it.get('brand_title')} / {it.get('size_title')} / {it.get('status')}")
+        st.code("Page article (exemple) : " + DIAG.get("item", "aucune requête"))
         uid0 = next((i.get("user_id") for i in all_items if i.get("user_id")), None)
         if uid0:
             try:
@@ -497,9 +535,10 @@ if st.button("Scanner et analyser", type="primary"):
     if rows:
         df = pd.DataFrame(rows)
         cols = ["Article", "Prix achat", "Revente estimée", "Bénéfice", "Marge %",
-                "Confiance", "Pays", "Domaine", "Favoris", "Produit", "Taille", "État", "Marque", "Lien", "Vendeur"]
+                "Confiance", "Verif", "Pays", "Domaine", "Favoris", "Produit", "Taille", "État", "Marque", "Lien", "Vendeur"]
         df = df[cols]
         df["Pays"] = df["Pays"].replace("", "?")
+        df["Verif"] = df["Verif"].replace({"ok": "✓", "": "?"})
         st.dataframe(df, use_container_width=True, hide_index=True,
                      column_config={"Lien": st.column_config.LinkColumn("Lien", display_text="Ouvrir"),
                                     "Vendeur": st.column_config.LinkColumn("Vendeur", display_text="Profil")})
