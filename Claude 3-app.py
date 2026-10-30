@@ -1,9 +1,6 @@
-import csv
+import json
+import re
 import statistics
-import threading
-import tkinter as tk
-import webbrowser
-from tkinter import filedialog, messagebox, ttk
 
 import requests
 
@@ -24,29 +21,68 @@ def price_of(item):
         return 0.0
 
 
+def extract_items(html):
+    """Extrait les articles depuis le HTML de la page catalogue (payload Next.js)."""
+    chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', html, re.S)
+    parts = []
+    for c in chunks:
+        try:
+            parts.append(json.loads('"' + c + '"'))
+        except ValueError:
+            pass
+    text = "".join(parts) if parts else html
+    dec = json.JSONDecoder()
+    found, seen = [], set()
+    for m in re.finditer(r'"brand_title"', text):
+        depth, start = 0, None
+        for i in range(m.start(), max(m.start() - 6000, -1), -1):
+            ch = text[i]
+            if ch == "}":
+                depth += 1
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                    break
+                depth -= 1
+        if start is None:
+            continue
+        try:
+            obj, _ = dec.raw_decode(text[start:])
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "id" in obj and "title" in obj and obj["id"] not in seen:
+            seen.add(obj["id"])
+            found.append(obj)
+    return found
+
+
 def fetch_items(query, price_max, pages, log):
-    s = requests.Session()
+    try:
+        from curl_cffi import requests as cr
+        s = cr.Session(impersonate="chrome")
+    except ImportError:
+        s = requests.Session()
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "text/html,application/xhtml+xml",
         "Accept-Language": "fr-FR,fr;q=0.9",
     })
-    s.get(BASE, timeout=15)  # récupère les cookies de session
+    s.get(BASE, timeout=20)  # cookies de session
     items = []
     for page in range(1, pages + 1):
-        params = [("search_text", query), ("page", page), ("per_page", 96),
-                  ("order", "newest_first")]
+        params = [("search_text", query), ("page", page), ("order", "newest_first")]
         if price_max:
             params.append(("price_to", price_max))
         for sid in STATUS_IDS:
             params.append(("status_ids[]", sid))
-        r = s.get(f"{BASE}/api/v2/catalog/items", params=params, timeout=20)
+        r = s.get(f"{BASE}/catalog", params=params, timeout=25)
         if r.status_code != 200:
-            log(f"Erreur HTTP {r.status_code} (Vinted bloque peut-être les requêtes). Réessaie plus tard.")
+            log(f"Erreur HTTP {r.status_code} (Vinted bloque peut-être les requêtes).")
             break
-        batch = r.json().get("items", [])
+        batch = extract_items(r.text)
         if not batch:
+            log("Aucun article lu : Vinted a peut-être changé le format de page.")
             break
         items.extend(batch)
         log(f"Page {page} : {len(batch)} articles")
@@ -92,110 +128,40 @@ def analyze(items, cfg):
     return rows
 
 
-class App(tk.Tk):
-    COLS = ["Article", "Marque", "Taille", "État", "Prix achat", "Revente estimée",
-            "Bénéfice", "Marge %", "Favoris", "Confiance"]
 
-    def __init__(self):
-        super().__init__()
-        self.title("Vinted Flip Analyzer")
-        self.geometry("1150x650")
-        self.rows = []
-        self.vars = {}
+import pandas as pd
+import streamlit as st
 
-        form = ttk.Frame(self, padding=8)
-        form.pack(fill="x")
-        fields = [("Recherche (ex: nike hoodie)", "query", "nike hoodie"),
-                  ("Budget max €", "budget", "20"),
-                  ("Bénéfice min €", "min_profit", "8"),
-                  ("Marge min %", "min_margin", "40"),
-                  ("Port d'achat €", "ship", "3"),
-                  ("Emballage €", "pack", "0.5"),
-                  ("Pages (96 art./page)", "pages", "2"),
-                  ("Comparables min", "min_comps", "3"),
-                  ("Coef. prix de vente réel", "discount", "0.9")]
-        for i, (label, key, default) in enumerate(fields):
-            r, c = divmod(i, 3)
-            ttk.Label(form, text=label).grid(row=r, column=c * 2, sticky="e", padx=4, pady=2)
-            v = tk.StringVar(value=default)
-            self.vars[key] = v
-            ttk.Entry(form, textvariable=v, width=22).grid(row=r, column=c * 2 + 1, padx=4)
+st.set_page_config(page_title="Vinted Flip Analyzer", layout="wide")
+st.title("Vinted Flip Analyzer")
 
-        btns = ttk.Frame(self, padding=(8, 0))
-        btns.pack(fill="x")
-        self.go = ttk.Button(btns, text="Analyser", command=self.start)
-        self.go.pack(side="left")
-        ttk.Button(btns, text="Exporter CSV", command=self.export).pack(side="left", padx=6)
-        self.status = ttk.Label(btns, text="Prêt.")
-        self.status.pack(side="left", padx=10)
+c1, c2, c3 = st.columns(3)
+query = c1.text_input("Recherche", "nike hoodie")
+budget = c2.number_input("Budget max €", 1.0, 1000.0, 20.0)
+pages = c3.number_input("Pages (96 art./page)", 1, 10, 2)
+c4, c5, c6 = st.columns(3)
+min_profit = c4.number_input("Bénéfice min €", 0.0, 500.0, 8.0)
+min_margin = c5.number_input("Marge min %", 0.0, 500.0, 40.0)
+min_comps = c6.number_input("Comparables min", 1, 50, 3)
+c7, c8, c9 = st.columns(3)
+ship = c7.number_input("Port d'achat €", 0.0, 50.0, 3.0)
+pack = c8.number_input("Emballage €", 0.0, 20.0, 0.5)
+discount = c9.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
 
-        self.tree = ttk.Treeview(self, columns=self.COLS, show="headings")
-        for c in self.COLS:
-            self.tree.heading(c, text=c, command=lambda col=c: self.sort_by(col))
-            self.tree.column(c, width=260 if c == "Article" else 95, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=8, pady=8)
-        self.tree.bind("<Double-1>", self.open_link)
-
-    def log(self, msg):
-        self.after(0, lambda: self.status.config(text=msg))
-
-    def start(self):
+if st.button("Analyser", type="primary"):
+    cfg = {"min_profit": min_profit, "min_margin": min_margin, "ship": ship,
+           "pack": pack, "min_comps": int(min_comps), "discount": discount}
+    with st.spinner("Récupération des articles..."):
         try:
-            cfg = {
-                "min_profit": float(self.vars["min_profit"].get()),
-                "min_margin": float(self.vars["min_margin"].get()),
-                "ship": float(self.vars["ship"].get()),
-                "pack": float(self.vars["pack"].get()),
-                "min_comps": int(self.vars["min_comps"].get()),
-                "discount": float(self.vars["discount"].get()),
-            }
-            budget = float(self.vars["budget"].get())
-            pages = int(self.vars["pages"].get())
-        except ValueError:
-            messagebox.showerror("Erreur", "Vérifie que les champs numériques sont corrects.")
-            return
-        query = self.vars["query"].get().strip()
-        self.go.config(state="disabled")
-        threading.Thread(target=self.work, args=(query, budget, pages, cfg), daemon=True).start()
-
-    def work(self, query, budget, pages, cfg):
-        try:
-            self.log("Récupération des articles...")
-            items = fetch_items(query, budget, pages, self.log)
-            self.rows = analyze(items, cfg)
-            self.after(0, self.fill)
-            self.log(f"{len(items)} articles analysés, {len(self.rows)} opportunités.")
+            items = fetch_items(query, budget, int(pages), st.write)
+            rows = analyze(items, cfg)
         except Exception as e:
-            self.log(f"Erreur : {e}")
-        finally:
-            self.after(0, lambda: self.go.config(state="normal"))
-
-    def fill(self):
-        self.tree.delete(*self.tree.get_children())
-        for i, r in enumerate(self.rows):
-            self.tree.insert("", "end", iid=str(i), values=[r[c] for c in self.COLS])
-
-    def sort_by(self, col):
-        rev = getattr(self, "_rev", False)
-        self.rows.sort(key=lambda r: r[col], reverse=not rev)
-        self._rev = not rev
-        self.fill()
-
-    def open_link(self, _):
-        sel = self.tree.selection()
-        if sel:
-            webbrowser.open(self.rows[int(sel[0])]["Lien"])
-
-    def export(self):
-        if not self.rows:
-            return
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
-        if path:
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.DictWriter(f, fieldnames=list(self.rows[0].keys()), delimiter=";")
-                w.writeheader()
-                w.writerows(self.rows)
-
-
-if __name__ == "__main__":
-    App().mainloop()
+            st.error(f"Erreur : {e}")
+            st.stop()
+    st.success(f"{len(items)} articles analysés, {len(rows)} opportunités.")
+    if rows:
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True,
+                     column_config={"Lien": st.column_config.LinkColumn("Lien")})
+        st.download_button("Exporter CSV", df.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                           "vinted.csv", "text/csv")
