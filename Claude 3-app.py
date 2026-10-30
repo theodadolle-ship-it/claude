@@ -205,19 +205,35 @@ import pandas as pd
 import streamlit as st
 
 POPULAIRES = [
-    "nike air force 1", "nike tech fleece", "adidas samba", "adidas gazelle",
-    "new balance 530", "levis 501", "carhartt veste", "ralph lauren pull",
-    "lacoste polo", "the north face doudoune", "dr martens", "patagonia polaire",
-    "tommy hilfiger pull", "nike air max", "dickies 874", "stussy",
-    "champion hoodie", "adidas firebird veste", "nike windrunner", "converse chuck 70",
+    # Sneakers
+    "nike air force 1", "nike air max 90", "nike air max plus tn", "nike dunk low", "jordan 1",
+    "adidas samba", "adidas gazelle", "adidas campus", "adidas spezial", "new balance 530",
+    "new balance 574", "asics gel", "salomon xt-6", "converse chuck 70", "puma suede",
+    "reebok classic", "dr martens 1460", "birkenstock arizona", "ugg classic", "crocs",
+    # Vêtements homme / mixte
+    "nike tech fleece", "nike windrunner", "nike sweat", "adidas firebird veste", "adidas survêtement",
+    "carhartt veste", "carhartt wip", "dickies 874", "stussy", "champion hoodie",
+    "levis 501", "levis 511", "diesel jean", "ralph lauren pull", "ralph lauren polo",
+    "lacoste polo", "fred perry polo", "tommy hilfiger pull", "calvin klein", "hugo boss",
+    "stone island", "cp company", "barbour veste", "burberry écharpe", "kappa survêtement",
+    # Outdoor
+    "the north face doudoune", "the north face nuptse", "patagonia polaire", "arcteryx",
+    "columbia veste", "napapijri", "helly hansen", "salomon veste",
+    # Femme / accessoires
+    "lululemon legging", "sandro pull", "maje robe", "sezane", "zadig voltaire",
+    "michael kors sac", "longchamp pliage", "guess sac", "adidas legging",
+    # Autres produits qui se vendent bien
+    "lego", "pokemon cartes", "nintendo switch jeu", "playstation 5 manette", "airpods",
 ]
+DEFAUT = ["nike air force 1", "nike tech fleece", "adidas samba", "levis 501",
+          "carhartt veste", "ralph lauren pull", "the north face doudoune", "new balance 530"]
 
 st.set_page_config(page_title="Vinted Flip Analyzer", layout="wide")
 st.title("Vinted Flip Analyzer")
 st.caption("Scan automatique des produits qui se revendent le plus : classement par bénéfice.")
 
 choix = st.multiselect("Produits à scanner (valeurs populaires en revente)", POPULAIRES,
-                       default=POPULAIRES[:8])
+                       default=DEFAUT)
 perso = st.text_input("Ajouter une recherche perso (optionnel)", "")
 c1, c2 = st.columns(2)
 budget = c1.number_input("Budget max € par article", 1.0, 1000.0, 40.0)
@@ -227,7 +243,7 @@ min_comps = c3.number_input("Comparables min", 1, 50, 3)
 pack = c4.number_input("Emballage €", 0.0, 20.0, 0.5)
 discount = c5.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
 min_fav = st.number_input("Favoris min (demande)", 0, 100, 0)
-only_profit = st.checkbox("Masquer les articles non rentables (bénéfice ≤ 0) et non estimables")
+show_unknown = st.checkbox("Afficher aussi les articles sans estimation de bénéfice")
 
 if st.button("Scanner et analyser", type="primary"):
     queries = list(choix) + ([perso.strip()] if perso.strip() else [])
@@ -257,8 +273,9 @@ if st.button("Scanner et analyser", type="primary"):
         st.error("Aucun article récupéré : Vinted bloque ou a changé son format.")
         st.stop()
     rows = analyze(all_items, cfg)
-    if only_profit:
-        rows = [r for r in rows if r["Bénéfice"] is not None and r["Bénéfice"] > 0]
+    # marges négatives toujours masquées
+    rows = [r for r in rows if (r["Bénéfice"] is not None and r["Bénéfice"] > 0)
+            or (show_unknown and r["Bénéfice"] is None)]
     if min_fav:
         rows = [r for r in rows if (r["Favoris"] or 0) >= min_fav]
     est = sum(1 for r in rows if r["Bénéfice"] is not None)
