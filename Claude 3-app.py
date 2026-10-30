@@ -215,10 +215,10 @@ c4, c5, c6 = st.columns(3)
 min_profit = c4.number_input("Bénéfice min €", 0.0, 500.0, 8.0)
 min_margin = c5.number_input("Marge min %", 0.0, 500.0, 40.0)
 min_comps = c6.number_input("Comparables min", 1, 50, 3)
-c7, c8, c9 = st.columns(3)
-ship = c7.number_input("Port d'achat €", 0.0, 50.0, 3.0)
-pack = c8.number_input("Emballage €", 0.0, 20.0, 0.5)
-discount = c9.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
+c7, c8 = st.columns(2)
+pack = c7.number_input("Emballage €", 0.0, 20.0, 0.5)
+discount = c8.number_input("Coef. prix de vente réel", 0.5, 1.2, 0.9)
+ship = 0.0
 
 if st.button("Analyser", type="primary"):
     cfg = {"min_profit": min_profit, "min_margin": min_margin, "ship": ship,
