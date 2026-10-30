@@ -522,6 +522,11 @@ if st.button("Scanner et analyser", type="primary"):
         for it in all_items[:2]:
             st.code(f"Champs article : {it.get('_keys')}\nVendeur : {it.get('_user')}\nitem_box : {it.get('_box')}\nMarque/taille/état lus : {it.get('brand_title')} / {it.get('size_title')} / {it.get('status')}")
         st.code("Page article (exemple) : " + DIAG.get("item", "aucune requête"))
+        try:
+            geo = requests.get("https://ipinfo.io/json", timeout=8).json()
+            st.code(f"Localisation du serveur qui fait les requêtes : {geo.get('country')} ({geo.get('city')}, {geo.get('region')})")
+        except Exception as ex:
+            st.code(f"Localisation du serveur : inconnue ({ex})")
         uid0 = next((i.get("user_id") for i in all_items if i.get("user_id")), None)
         if uid0:
             try:
