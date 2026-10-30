@@ -1,2 +1,6 @@
+requests
+curl_cffi
 streamlit
 pandas
+
+
