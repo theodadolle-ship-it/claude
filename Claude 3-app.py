@@ -56,6 +56,57 @@ def extract_items(html):
     return found
 
 
+def _txt(v):
+    if isinstance(v, dict):
+        return str(v.get("title") or v.get("name") or v.get("label") or "")
+    return "" if v is None else str(v)
+
+
+def normalize(d):
+    price = d.get("price")
+    if price is None:
+        price = d.get("total_item_price") or d.get("price_numeric")
+    url = d.get("url") or d.get("path") or f"/items/{d.get('id')}"
+    if url.startswith("/"):
+        url = BASE + url
+    return {
+        "id": d.get("id"),
+        "title": _txt(d.get("title") or d.get("name")),
+        "brand_title": _txt(d.get("brand_title") or d.get("brand")),
+        "size_title": _txt(d.get("size_title") or d.get("size")),
+        "status": _txt(d.get("status") or d.get("condition")),
+        "price": price,
+        "favourite_count": d.get("favourite_count", d.get("favorite_count", 0)),
+        "url": url,
+    }
+
+
+def extract_json(text):
+    """Cherche récursivement les articles dans une réponse JSON quelle que soit sa forme."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    found, seen = [], set()
+
+    def walk(x):
+        if isinstance(x, dict):
+            has_price = any(k in x for k in ("price", "total_item_price", "price_numeric"))
+            if "id" in x and ("title" in x or "name" in x) and has_price:
+                if x["id"] not in seen:
+                    seen.add(x["id"])
+                    found.append(normalize(x))
+                return
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+
+    walk(data)
+    return found
+
+
 def fetch_items(query, price_max, pages, log):
     try:
         from curl_cffi import requests as cr
@@ -93,9 +144,10 @@ def fetch_items(query, price_max, pages, log):
                          f"{BASE}/svc-catalogue/items"):
                 r2 = s.get(host, params=p2, timeout=25)
                 if r2.status_code == 200:
-                    batch = extract_items(r2.text)
+                    batch = extract_json(r2.text) or extract_items(r2.text)
                     if batch:
                         break
+                    log("Réponse reçue mais illisible. Début : " + r2.text[:400])
                 log(f"{host.split('/')[2]} : HTTP {r2.status_code}")
         if not batch:
             log(f"Aucun article récupéré (page {page}). Vinted bloque ou a changé son format.")
@@ -123,6 +175,8 @@ def analyze(items, cfg):
         if buy <= 0:
             continue
         key = (it.get("brand_title", "").lower(), it.get("size_title", "").lower())
+        if not key[0]:
+            continue
         comps = groups[key]
         if len(comps) < cfg["min_comps"]:
             continue
